@@ -5,7 +5,6 @@
 1. Создайте виртуальное окружение (рекомендуется Python 3.12):
 
 ```bash
-cd /Users/danyapetrovich/PycharmProjects/bootcamp_llm
 python3 -m venv .venv
 ```
 
