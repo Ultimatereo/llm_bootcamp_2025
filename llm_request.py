@@ -55,24 +55,44 @@ def get_user_prompt(
     user_task: str,
     structure: Dict[str, Any],
     df_description: Dict[str, Any],
+    previous_error: str | None = None,
+    previous_code: str | None = None,
 ) -> str:
     """
     Build the user prompt that describes:
     - the user's analytic request,
     - the high-level structure of the DataFrame,
     - precomputed description/statistics.
+    - optionally: previous error and code for retry attempts.
     """
-    return (
+    base_prompt = (
         "User task (in natural language):\n"
         f"{user_task}\n\n"
         "Current DataFrame structure (column -> dtype as string):\n"
         f"{structure}\n\n"
         "Precomputed description/statistics of the dataset (per-column stats):\n"
         f"{df_description}\n\n"
-        "Write Python code that, when executed locally, performs the requested analysis "
-        "on 'vacancies.json', builds any requested plots, saves them as PNG files, and "
-        "populates the 'ANALYTICS_RESULT' dictionary as specified in the system prompt."
     )
+    
+    if previous_error and previous_code:
+        retry_section = (
+            "\n"
+            "⚠️ IMPORTANT: The previous code attempt failed with an error. "
+            "Please fix the code based on the error message below.\n\n"
+            f"Previous error: {previous_error}\n\n"
+            "Previous code (for reference, fix the issues):\n"
+            f"```python\n{previous_code[:2000]}\n```\n\n"
+            "Please generate corrected Python code that addresses the error above. "
+            "Make sure to follow all constraints from the system prompt.\n"
+        )
+        return base_prompt + retry_section
+    else:
+        return (
+            base_prompt
+            + "Write Python code that, when executed locally, performs the requested analysis "
+            "on 'vacancies.json', builds any requested plots, saves them as PNG files, and "
+            "populates the 'ANALYTICS_RESULT' dictionary as specified in the system prompt."
+        )
 
 
 def _extract_code_block(text: str) -> str:
@@ -95,6 +115,63 @@ def _extract_code_block(text: str) -> str:
         code = code[5:].strip()
 
     return code
+
+
+def get_report_system_prompt() -> str:
+    """
+    System prompt for generating a human-readable analytical report.
+    """
+    return (
+        "You are an experienced data analyst preparing a brief analytical report. "
+        "Your task is to write a clear, concise, and professional summary of the analysis results "
+        "in natural language, as if you were presenting findings to a stakeholder.\n\n"
+        "Guidelines:\n"
+        "- Write in Russian (if the user's question was in Russian) or English (if in English).\n"
+        "- Be extremely concise: write ONLY 1 paragraph maximum (3-5 sentences).\n"
+        "- Highlight the most important findings and insights from the metrics.\n"
+        "- Reference the generated plots by their names when discussing visualizations.\n"
+        "- Use specific numbers from the metrics to support your conclusions.\n"
+        "- Write in a professional but accessible tone.\n"
+        "- Do not include technical jargon unless necessary.\n"
+        "- Combine context, key findings, and conclusions in a single paragraph.\n\n"
+        "Important: Always mention plot names when referring to visualizations. "
+        "For example: 'Как видно на графике \"salary_distribution.png\"...' or "
+        "'The chart \"median_salaries.png\" shows that...'"
+    )
+
+
+def get_report_user_prompt(user_task: str, analytics_result: Dict[str, Any]) -> str:
+    """
+    Build the user prompt for report generation that includes:
+    - the original user's question/task,
+    - the computed analytics results (metrics and plots).
+    """
+    import json
+    
+    # Форматируем метрики для читаемости
+    metrics_str = json.dumps(analytics_result.get("metrics", {}), ensure_ascii=False, indent=2)
+    
+    # Форматируем информацию о графиках
+    plots_info = analytics_result.get("plots", [])
+    plots_str = ""
+    if plots_info:
+        plots_str = "\nGenerated plots:\n"
+        for plot in plots_info:
+            plot_name = plot.get("name", "unnamed")
+            plot_path = plot.get("path", "unknown")
+            plots_str += f"- {plot_name} (saved at: {plot_path})\n"
+    else:
+        plots_str = "\nNo plots were generated for this analysis.\n"
+    
+    return (
+        f"Original user question/task:\n{user_task}\n\n"
+        f"Analytics results:\n"
+        f"Metrics:\n{metrics_str}\n"
+        f"{plots_str}\n"
+        "Please write a very brief analytical report (1 paragraph, 3-5 sentences) that answers the user's question, "
+        "highlights the most important findings from the metrics, and references the plots when discussing visualizations. "
+        "Write as if you are a data analyst presenting findings to a stakeholder. Be concise and to the point."
+    )
 
 
 def llm_request(user_prompt: str, system_prompt: str) -> str:
@@ -121,4 +198,30 @@ def llm_request(user_prompt: str, system_prompt: str) -> str:
 
     raw_content = data["choices"][0]["message"]["content"]
     return _extract_code_block(raw_content)
+
+
+def llm_request_report(user_prompt: str, system_prompt: str) -> str:
+    """
+    Make a request to the Groq LLM for generating a text report (not code).
+    Returns the raw text response without code extraction.
+    """
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {os.environ['API_KEY']}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.7,  # Немного выше для более естественного текста
+    }
+
+    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+
+    return data["choices"][0]["message"]["content"].strip()
 
